@@ -4,58 +4,124 @@
  // Resources: ChatGPT (OpenAI), setup assistance; conversation link to be added
 
 
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 
-int evaluate_basic(const char *line, long long *result) {
-    const char *p = line;
-    char *end;
-
-    while (*p == ' ' || *p == '\t') {
-        p++;
+void skip_spaces(const char **p) {
+    while (**p == ' ' || **p == '\t') {
+        (*p)++;
     }
+}
 
-    if (!isdigit((unsigned char)*p)) {
+int parse_number(const char **p, long long *result) {
+    skip_spaces(p);
+
+    if (!isdigit((unsigned char)**p)) {
         return 0;
     }
 
-    long long total = strtoll(p, &end, 10);
-    p = end;
+    char *end;
+    errno = 0;
+    long long number = strtoll(*p, &end, 10);
+
+    if (errno == ERANGE) {
+        return 0;
+    }
+
+    *p = end;
+    *result = number;
+    return 1;
+}
+
+int parse_term(const char **p, long long *result) {
+    long long total;
+
+    if (!parse_number(p, &total)) {
+        return 0;
+    }
 
     while (1) {
-        while (*p == ' ' || *p == '\t') {
-            p++;
+        skip_spaces(p);
+        char op = **p;
+
+        if (op != '*' && op != '/') {
+            break;
         }
 
-        if (*p == '\n' || *p == '\0') {
-            *result = total;
-            return 1;
-        }
+        (*p)++;
 
-        char op = *p++;
-
-        if (op != '+' && op != '-') {
+        long long number;
+        if (!parse_number(p, &number)) {
             return 0;
         }
 
-        while (*p == ' ' || *p == '\t') {
-            p++;
-        }
-
-        if (!isdigit((unsigned char)*p)) {
-            return 0;
-        }
-
-        long long number = strtoll(p, &end, 10);
-        p = end;
-
-        if (op == '+') {
-            total += number;
+        if (op == '*') {
+            if (__builtin_mul_overflow(total, number, &total)) {
+                return 0;
+            }
         } else {
-            total -= number;
+            if (number == 0 ||
+                (total == LLONG_MIN && number == -1)) {
+                return 0;
+            }
+            total /= number;
         }
     }
+
+    *result = total;
+    return 1;
+}
+
+int parse_expression(const char **p, long long *result) {
+    long long total;
+
+    if (!parse_term(p, &total)) {
+        return 0;
+    }
+
+    while (1) {
+        skip_spaces(p);
+        char op = **p;
+
+        if (op != '+' && op != '-') {
+            break;
+        }
+
+        (*p)++;
+
+        long long number;
+        if (!parse_term(p, &number)) {
+            return 0;
+        }
+
+        if (op == '+') {
+            if (__builtin_add_overflow(total, number, &total)) {
+                return 0;
+            }
+        } else {
+            if (__builtin_sub_overflow(total, number, &total)) {
+                return 0;
+            }
+        }
+    }
+
+    *result = total;
+    return 1;
+}
+
+int evaluate_basic(const char *line, long long *result) {
+    const char *p = line;
+
+    if (!parse_expression(&p, result)) {
+        return 0;
+    }
+
+    skip_spaces(&p);
+    return *p == '\n' || *p == '\r' || *p == '\0';
 }
 
 int main(int argc, char *argv[]) {
