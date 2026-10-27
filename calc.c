@@ -287,7 +287,41 @@ int evaluate_basic(const char *line, Value *result) {
 }
 
 
-// Keep the results temporary until the entire file has no errors.
+// AI (ChatGPT): prompt "NEXT!" (continue the graded lab after file/CLI support).
+// Link: see the AI conversation listed on line 4.
+// Doubling capacity avoids reallocating and copying the line for every character.
+// This also allows lines much longer than a fixed-size fgets buffer.
+static int read_line_dynamic(FILE *input, char **line, size_t *capacity,
+                             size_t *length) {
+    int ch;
+    *length = 0;
+    while ((ch = fgetc(input)) != EOF) {
+        if (*length > (size_t)-1 - 2) return -1;
+        size_t needed = *length + 2; // current character plus terminating NUL
+        if (needed > *capacity) {
+            size_t new_capacity = *capacity ? *capacity : 8192;
+            while (new_capacity < needed) {
+                if (new_capacity > (size_t)-1 / 2) {
+                    new_capacity = needed;
+                    break;
+                }
+                new_capacity *= 2;
+            }
+            char *new_line = realloc(*line, new_capacity);
+            if (new_line == NULL) return -1;
+            *line = new_line;
+            *capacity = new_capacity;
+        }
+        (*line)[(*length)++] = (char)ch;
+        if (ch == '\n') break;
+    }
+    if (ferror(input)) return -1;
+    if (*length == 0) return 0; // EOF with no further line
+    (*line)[*length] = '\0';
+    return 1;
+}
+
+// Keep results in a temporary file until every expression has succeeded.
 static int evaluate_file(FILE *input, FILE *output) {
     FILE *temporary = tmpfile();
     if (temporary == NULL) {
@@ -295,18 +329,21 @@ static int evaluate_file(FILE *input, FILE *output) {
         return 0;
     }
 
-    char line[4096];
+    char *line = NULL;
+    size_t capacity = 0;
+    size_t line_length = 0;
     size_t offset = 0;
-    while (fgets(line, sizeof(line), input)) {
+    int status;
+    while ((status = read_line_dynamic(input, &line, &capacity,
+                                       &line_length)) == 1) {
         const char *p = line;
-        while (*p == ' ' || *p == '\t') {
-            p++;
-        }
+        while (*p == ' ' || *p == '\t') p++;
         if (*p != '\n' && *p != '\r' && *p != '\0' && *p != '#') {
             Value value;
             if (!evaluate_basic(line, &value)) {
                 size_t position = offset + (size_t)(error_at - line) + 1;
                 int ok = fprintf(output, "ERROR:%zu\n", position) >= 0;
+                free(line);
                 fclose(temporary);
                 return ok;
             }
@@ -314,13 +351,17 @@ static int evaluate_file(FILE *input, FILE *output) {
                 ? fprintf(temporary, "%.15g\n", value.decimal)
                 : fprintf(temporary, "%lld\n", value.integer);
             if (ok < 0) {
+                free(line);
                 fclose(temporary);
                 return 0;
             }
         }
-        offset += strlen(line);
+        // Counting the full line includes newline and ignored comment characters.
+        offset += line_length;
     }
-    if (ferror(input) || ferror(temporary)) {
+    free(line);
+    if (status < 0 || ferror(temporary)) {
+        fprintf(stderr, "Unable to read input or allocate line memory\n");
         fclose(temporary);
         return 0;
     }
