@@ -10,6 +10,8 @@
 #include <limits.h>
 #include <string.h>
 #include <math.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
 // Preserve integer division unless an operand is a decimal number.
 typedef struct {
@@ -284,66 +286,219 @@ int evaluate_basic(const char *line, Value *result) {
     return 1;
 }
 
-int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: ./calc input.txt\n");
-        return 1;
-    }
 
-    FILE *file = fopen(argv[1], "r");
-    if (file == NULL) {
-        perror("Cannot open input file");
-        return 1;
-    }
-
-    // Save results temporarily so errors discard earlier answers.
-    FILE *results = tmpfile();
-    if (results == NULL) {
+// Keep the results temporary until the entire file has no errors.
+static int evaluate_file(FILE *input, FILE *output) {
+    FILE *temporary = tmpfile();
+    if (temporary == NULL) {
         perror("Cannot create temporary results file");
-        fclose(file);
-        return 1;
+        return 0;
     }
 
     char line[4096];
     size_t offset = 0;
-    while (fgets(line, sizeof(line), file)) {
+    while (fgets(line, sizeof(line), input)) {
         const char *p = line;
         while (*p == ' ' || *p == '\t') {
             p++;
         }
-
         if (*p != '\n' && *p != '\r' && *p != '\0' && *p != '#') {
             Value value;
             if (!evaluate_basic(line, &value)) {
                 size_t position = offset + (size_t)(error_at - line) + 1;
-                printf("ERROR:%zu\n", position);
-                fclose(results);
-                fclose(file);
-                return 0;
+                int ok = fprintf(output, "ERROR:%zu\n", position) >= 0;
+                fclose(temporary);
+                return ok;
             }
-            if (value.is_float) {
-                fprintf(results, "%.15g\n", value.decimal);
-            } else {
-                fprintf(results, "%lld\n", value.integer);
+            int ok = value.is_float
+                ? fprintf(temporary, "%.15g\n", value.decimal)
+                : fprintf(temporary, "%lld\n", value.integer);
+            if (ok < 0) {
+                fclose(temporary);
+                return 0;
             }
         }
         offset += strlen(line);
     }
+    if (ferror(input) || ferror(temporary)) {
+        fclose(temporary);
+        return 0;
+    }
+    rewind(temporary);
+    int ch;
+    while ((ch = fgetc(temporary)) != EOF) {
+        if (fputc(ch, output) == EOF) {
+            fclose(temporary);
+            return 0;
+        }
+    }
+    int ok = !ferror(temporary);
+    if (fclose(temporary) != 0) ok = 0;
+    return ok;
+}
 
-    if (ferror(file)) {
-        perror("Error reading input");
-        fclose(results);
-        fclose(file);
+static char *copy_n(const char *s, size_t n) {
+    char *out = malloc(n + 1);
+    if (out == NULL) return NULL;
+    memcpy(out, s, n);
+    out[n] = '\0';
+    return out;
+}
+
+static char *file_stem(const char *path) {
+    size_t len = strlen(path);
+    while (len && path[len - 1] == '/') len--;
+    size_t from = len;
+    while (from && path[from - 1] != '/') from--;
+    if (len == from) return NULL;
+    if (len - from >= 4 && !strncmp(path + len - 4, ".txt", 4)) len -= 4;
+    return copy_n(path + from, len - from);
+}
+
+static char *join_path(const char *dir, const char *name) {
+    size_t a = strlen(dir), b = strlen(name);
+    int slash = a && dir[a - 1] != '/';
+    if (a > (size_t)-1 - b - 2) return NULL;
+    char *path = malloc(a + b + (size_t)slash + 1);
+    if (path == NULL) return NULL;
+    memcpy(path, dir, a);
+    if (slash) path[a++] = '/';
+    memcpy(path + a, name, b + 1);
+    return path;
+}
+
+static char *default_output_dir(const char *path) {
+    char *stem = file_stem(path);
+    if (stem == NULL) return NULL;
+    const char suffix[] = "_lakshay_241ADB131";
+    char *name = malloc(strlen(stem) + sizeof(suffix));
+    if (name) sprintf(name, "%s%s", stem, suffix);
+    free(stem);
+    return name;
+}
+
+static int create_output_dir(const char *path) {
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        if (S_ISDIR(st.st_mode)) return 1;
+        fprintf(stderr, "Output path is not a directory: %s\n", path);
+        return 0;
+    }
+    if (mkdir(path, 0777) == 0) return 1;
+    fprintf(stderr, "Cannot create output directory '%s': %s\n", path, strerror(errno));
+    return 0;
+}
+
+static int process_file(const char *input_path, const char *outdir) {
+    FILE *input = fopen(input_path, "r");
+    if (input == NULL) {
+        fprintf(stderr, "Cannot open input '%s': %s\n", input_path, strerror(errno));
+        return 0;
+    }
+
+    char *stem = file_stem(input_path);
+    const char suffix[] = "_lakshay_negi_241ADB131.txt";
+    char *filename = NULL;
+    if (stem) {
+        filename = malloc(strlen(stem) + sizeof(suffix));
+        if (filename) sprintf(filename, "%s%s", stem, suffix);
+    }
+    char *output_path = filename ? join_path(outdir, filename) : NULL;
+    free(stem);
+    free(filename);
+    if (output_path == NULL) {
+        fprintf(stderr, "Cannot construct output filename\n");
+        fclose(input);
+        return 0;
+    }
+
+    FILE *output = fopen(output_path, "w");
+    if (output == NULL) {
+        fprintf(stderr, "Cannot write '%s': %s\n", output_path, strerror(errno));
+        free(output_path);
+        fclose(input);
+        return 0;
+    }
+
+    int ok = evaluate_file(input, output);
+    if (fclose(output) != 0) ok = 0;
+    if (fclose(input) != 0) ok = 0;
+    if (!ok) fprintf(stderr, "Failed processing '%s'\n", input_path);
+    free(output_path);
+    return ok;
+}
+
+int main(int argc, char *argv[]) {
+    const char *input_path = NULL;
+    const char *input_dir = NULL;
+    const char *output_arg = NULL;
+
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "-d") || !strcmp(argv[i], "--dir")) {
+            if (input_dir || i + 1 >= argc || argv[i + 1][0] == '-') {
+                fprintf(stderr, "Invalid directory argument\n");
+                return 1;
+            }
+            input_dir = argv[++i];
+        } else if (!strcmp(argv[i], "-o") || !strcmp(argv[i], "--output-dir")) {
+            if (output_arg || i + 1 >= argc || argv[i + 1][0] == '-') {
+                fprintf(stderr, "Invalid output directory argument\n");
+                return 1;
+            }
+            output_arg = argv[++i];
+        } else if (argv[i][0] == '-' || input_path != NULL) {
+            fprintf(stderr, "Unknown or extra argument: %s\n", argv[i]);
+            return 1;
+        } else {
+            input_path = argv[i];
+        }
+    }
+    if ((input_dir && input_path) || (!input_dir && !input_path)) {
+        fprintf(stderr, "Usage: ./calc [-d DIR] [-o OUTDIR] [input.txt]\n");
         return 1;
     }
 
-    rewind(results);
-    int ch;
-    while ((ch = fgetc(results)) != EOF) {
-        putchar(ch);
+    char *default_dir = NULL;
+    const char *outdir = output_arg;
+    if (outdir == NULL) {
+        default_dir = default_output_dir(input_dir ? input_dir : input_path);
+        outdir = default_dir;
+        if (outdir == NULL) {
+            fprintf(stderr, "Cannot name output directory\n");
+            return 1;
+        }
     }
 
-    fclose(results);
-    fclose(file);
-    return 0;
+    if (!create_output_dir(outdir)) {
+        free(default_dir);
+        return 1;
+    }
+
+    int ok = 1;
+    if (input_dir) {
+        DIR *dir = opendir(input_dir);
+        if (dir == NULL) {
+            fprintf(stderr, "Cannot open directory '%s': %s\n", input_dir, strerror(errno));
+            free(default_dir);
+            return 1;
+        }
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            size_t len = strlen(entry->d_name);
+            if (len < 5 || strcmp(entry->d_name + len - 4, ".txt")) continue;
+            char *path = join_path(input_dir, entry->d_name);
+            if (path == NULL) { ok = 0; break; }
+            struct stat st;
+            if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+                if (!process_file(path, outdir)) ok = 0;
+            }
+            free(path);
+            if (!ok) break;
+        }
+        if (closedir(dir) != 0) ok = 0;
+    } else {
+        ok = process_file(input_path, outdir);
+    }
+    free(default_dir);
+    return ok ? 0 : 1;
 }
