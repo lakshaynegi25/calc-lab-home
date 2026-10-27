@@ -37,10 +37,80 @@ int parse_number(const char **p, long long *result) {
     return 1;
 }
 
+int parse_expression(const char **p, long long *result);
+
+int parse_primary(const char **p, long long *result) {
+    skip_spaces(p);
+
+    if (**p == '(') {
+        (*p)++;
+
+        if (!parse_expression(p, result)) {
+            return 0;
+        }
+
+        skip_spaces(p);
+
+        if (**p != ')') {
+            return 0;
+        }
+
+        (*p)++;
+        return 1;
+    }
+
+    return parse_number(p, result);
+}
+
+int parse_power(const char **p, long long *result) {
+    long long base;
+
+    if (!parse_primary(p, &base)) {
+        return 0;
+    }
+
+    skip_spaces(p);
+
+    if ((*p)[0] == '*' && (*p)[1] == '*') {
+        (*p) += 2;
+
+        long long exponent;
+
+        if (!parse_power(p, &exponent) || exponent < 0) {
+            return 0;
+        }
+
+        long long answer = 1;
+        unsigned long long exp = (unsigned long long)exponent;
+
+        while (exp > 0) {
+            if (exp % 2 == 1) {
+                if (__builtin_mul_overflow(answer, base, &answer)) {
+                    return 0;
+                }
+            }
+
+            exp /= 2;
+
+            if (exp > 0) {
+                if (__builtin_mul_overflow(base, base, &base)) {
+                    return 0;
+                }
+            }
+        }
+
+        *result = answer;
+        return 1;
+    }
+
+    *result = base;
+    return 1;
+}
+
 int parse_term(const char **p, long long *result) {
     long long total;
 
-    if (!parse_number(p, &total)) {
+    if (!parse_power(p, &total)) {
         return 0;
     }
 
@@ -55,7 +125,7 @@ int parse_term(const char **p, long long *result) {
         (*p)++;
 
         long long number;
-        if (!parse_number(p, &number)) {
+        if (!parse_power(p, &number)) {
             return 0;
         }
 
