@@ -9,8 +9,20 @@
 #include <errno.h>
 #include <limits.h>
 #include <string.h>
+#include <math.h>
+
+// Preserve integer division unless an operand is a decimal number.
+typedef struct {
+    long long integer;
+    double decimal;
+    int is_float;
+} Value;
 
 static const char *error_at;
+
+static double as_double(Value value) {
+    return value.is_float ? value.decimal : (double)value.integer;
+}
 
 void skip_spaces(const char **p) {
     while (**p == ' ' || **p == '\t') {
@@ -18,7 +30,7 @@ void skip_spaces(const char **p) {
     }
 }
 
-int parse_number(const char **p, long long *result) {
+int parse_number(const char **p, Value *result) {
     skip_spaces(p);
 
     if (!isdigit((unsigned char)**p)) {
@@ -27,23 +39,54 @@ int parse_number(const char **p, long long *result) {
     }
 
     const char *start = *p;
+    const char *end_digits = start;
+    while (isdigit((unsigned char)*end_digits)) {
+        end_digits++;
+    }
+
+    if (*end_digits == '.' && isdigit((unsigned char)end_digits[1])) {
+        const char *end_fraction = end_digits + 1;
+        while (isdigit((unsigned char)*end_fraction)) {
+            end_fraction++;
+        }
+
+        // Scientific notation is forbidden; report its first invalid letter.
+        if (*end_fraction == 'e' || *end_fraction == 'E') {
+            error_at = end_fraction;
+            return 0;
+        }
+
+        errno = 0;
+        double number = strtod(start, NULL);
+        if (!isfinite(number)) {
+            error_at = start;
+            return 0;
+        }
+        result->decimal = number;
+        result->integer = 0;
+        result->is_float = 1;
+        *p = end_fraction;
+        return 1;
+    }
+
     char *end;
     errno = 0;
-    long long number = strtoll(*p, &end, 10);
-
+    long long number = strtoll(start, &end, 10);
     if (errno == ERANGE) {
         error_at = start;
         return 0;
     }
 
+    result->integer = number;
+    result->decimal = 0.0;
+    result->is_float = 0;
     *p = end;
-    *result = number;
     return 1;
 }
 
-int parse_expression(const char **p, long long *result);
+int parse_expression(const char **p, Value *result);
 
-int parse_primary(const char **p, long long *result) {
+int parse_primary(const char **p, Value *result) {
     skip_spaces(p);
 
     if (**p == '(') {
@@ -63,8 +106,8 @@ int parse_primary(const char **p, long long *result) {
     return parse_number(p, result);
 }
 
-int parse_power(const char **p, long long *result) {
-    long long base;
+int parse_power(const char **p, Value *result) {
+    Value base;
     if (!parse_primary(p, &base)) {
         return 0;
     }
@@ -75,30 +118,47 @@ int parse_power(const char **p, long long *result) {
         (*p) += 2;
         skip_spaces(p);
         const char *exp_at = *p;
-        long long exponent;
+        Value exponent;
 
+        // Parsing the exponent recursively makes ** right-associative.
         if (!parse_power(p, &exponent)) {
             return 0;
         }
-        if (exponent < 0) {
+
+        if (base.is_float || exponent.is_float) {
+            double value = pow(as_double(base), as_double(exponent));
+            if (!isfinite(value)) {
+                error_at = op_at;
+                return 0;
+            }
+            result->decimal = value;
+            result->integer = 0;
+            result->is_float = 1;
+            return 1;
+        }
+
+        if (exponent.integer < 0) {
             error_at = exp_at;
             return 0;
         }
 
         long long answer = 1;
-        unsigned long long exp = (unsigned long long)exponent;
+        long long factor = base.integer;
+        unsigned long long exp = (unsigned long long)exponent.integer;
         while (exp > 0) {
-            if (exp % 2 == 1 && __builtin_mul_overflow(answer, base, &answer)) {
+            if (exp % 2 == 1 && __builtin_mul_overflow(answer, factor, &answer)) {
                 error_at = op_at;
                 return 0;
             }
             exp /= 2;
-            if (exp > 0 && __builtin_mul_overflow(base, base, &base)) {
+            if (exp > 0 && __builtin_mul_overflow(factor, factor, &factor)) {
                 error_at = op_at;
                 return 0;
             }
         }
-        *result = answer;
+        result->integer = answer;
+        result->decimal = 0.0;
+        result->is_float = 0;
         return 1;
     }
 
@@ -106,8 +166,8 @@ int parse_power(const char **p, long long *result) {
     return 1;
 }
 
-int parse_term(const char **p, long long *result) {
-    long long total;
+int parse_term(const char **p, Value *result) {
+    Value total;
     if (!parse_power(p, &total)) {
         return 0;
     }
@@ -123,26 +183,38 @@ int parse_term(const char **p, long long *result) {
         skip_spaces(p);
         const char *operand_at = *p;
 
-        long long number;
+        Value number;
         if (!parse_power(p, &number)) {
             return 0;
         }
 
-        if (op == '*') {
-            if (__builtin_mul_overflow(total, number, &total)) {
+        if (op == '/' && (number.is_float ? number.decimal == 0.0 : number.integer == 0)) {
+            error_at = operand_at;
+            return 0;
+        }
+
+        if (total.is_float || number.is_float) {
+            double left = as_double(total);
+            double right = as_double(number);
+            double value = op == '*' ? left * right : left / right;
+            if (!isfinite(value)) {
+                error_at = op_at;
+                return 0;
+            }
+            total.decimal = value;
+            total.integer = 0;
+            total.is_float = 1;
+        } else if (op == '*') {
+            if (__builtin_mul_overflow(total.integer, number.integer, &total.integer)) {
                 error_at = op_at;
                 return 0;
             }
         } else {
-            if (number == 0) {
-                error_at = operand_at;
-                return 0;
-            }
-            if (total == LLONG_MIN && number == -1) {
+            if (total.integer == LLONG_MIN && number.integer == -1) {
                 error_at = op_at;
                 return 0;
             }
-            total /= number;
+            total.integer /= number.integer;
         }
     }
 
@@ -150,8 +222,8 @@ int parse_term(const char **p, long long *result) {
     return 1;
 }
 
-int parse_expression(const char **p, long long *result) {
-    long long total;
+int parse_expression(const char **p, Value *result) {
+    Value total;
     if (!parse_term(p, &total)) {
         return 0;
     }
@@ -164,18 +236,29 @@ int parse_expression(const char **p, long long *result) {
         }
         const char *op_at = *p;
         (*p)++;
-        long long number;
+        Value number;
         if (!parse_term(p, &number)) {
             return 0;
         }
 
-        if (op == '+') {
-            if (__builtin_add_overflow(total, number, &total)) {
+        if (total.is_float || number.is_float) {
+            double left = as_double(total);
+            double right = as_double(number);
+            double value = op == '+' ? left + right : left - right;
+            if (!isfinite(value)) {
+                error_at = op_at;
+                return 0;
+            }
+            total.decimal = value;
+            total.integer = 0;
+            total.is_float = 1;
+        } else if (op == '+') {
+            if (__builtin_add_overflow(total.integer, number.integer, &total.integer)) {
                 error_at = op_at;
                 return 0;
             }
         } else {
-            if (__builtin_sub_overflow(total, number, &total)) {
+            if (__builtin_sub_overflow(total.integer, number.integer, &total.integer)) {
                 error_at = op_at;
                 return 0;
             }
@@ -186,7 +269,7 @@ int parse_expression(const char **p, long long *result) {
     return 1;
 }
 
-int evaluate_basic(const char *line, long long *result) {
+int evaluate_basic(const char *line, Value *result) {
     const char *p = line;
     error_at = NULL;
     if (!parse_expression(&p, result)) {
@@ -213,7 +296,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Store results temporarily so any error replaces the entire output.
+    // Save results temporarily so errors discard earlier answers.
     FILE *results = tmpfile();
     if (results == NULL) {
         perror("Cannot create temporary results file");
@@ -230,7 +313,7 @@ int main(int argc, char *argv[]) {
         }
 
         if (*p != '\n' && *p != '\r' && *p != '\0' && *p != '#') {
-            long long value;
+            Value value;
             if (!evaluate_basic(line, &value)) {
                 size_t position = offset + (size_t)(error_at - line) + 1;
                 printf("ERROR:%zu\n", position);
@@ -238,9 +321,13 @@ int main(int argc, char *argv[]) {
                 fclose(file);
                 return 0;
             }
-            fprintf(results, "%lld\n", value);
+            if (value.is_float) {
+                fprintf(results, "%.15g\n", value.decimal);
+            } else {
+                fprintf(results, "%lld\n", value.integer);
+            }
         }
-        offset += strlen(line);  // Newlines and ignored comments still count.
+        offset += strlen(line);
     }
 
     if (ferror(file)) {
