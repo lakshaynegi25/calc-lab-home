@@ -38,11 +38,11 @@ void skip_spaces(const char **p) {
 // reads integers and decimals using strtoll and strtod? I'm confused about how
 // it rejects invalid number formats."
 // Checking the digits first prevents forbidden decimal forms from being accepted.
-// A missing number is reported where an operand was expected.
-// At the end of a line, this is the newline or EOF position.
+
 int parse_number(const char **p, Value *result) {
     skip_spaces(p);
-
+// A missing number is reported where an operand was expected.
+// At the end of a line, this is the newline or EOF position.
     if (!isdigit((unsigned char)**p)) {
         error_at = *p;
         return 0;
@@ -99,9 +99,12 @@ int parse_expression(const char **p, Value *result);
 // AI (ChatGPT, review): prompt "Can you explain how parse_primary handles
 // nested parentheses and detects a missing closing bracket?"
 // A parenthesized expression reuses the full parser so nesting has no special rule.
+// Report a missing ')' where it was expected.
+// At line end, this is the newline or EOF position.
 int parse_primary(const char **p, Value *result) {
     skip_spaces(p);
-
+// A missing ')' is reported where it was expected.
+// At line end, this is the newline or end-of-input position.
     if (**p == '(') {
         (*p)++;
         if (!parse_expression(p, result)) {
