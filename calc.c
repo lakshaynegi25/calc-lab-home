@@ -7,7 +7,6 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <errno.h>
-#include <limits.h>
 #include <string.h>
 #include <math.h>
 #include <dirent.h>
@@ -227,7 +226,8 @@ int parse_term(const char **p, Value *result) {
                 return 0;
             }
         } else {
-            if (total.integer == LLONG_MIN && number.integer == -1) {
+            if (total.integer == (-9223372036854775807LL - 1LL) &&
+             number.integer == -1) {
                 error_at = op_at;
                 return 0;
             }
