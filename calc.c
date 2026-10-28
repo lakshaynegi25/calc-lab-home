@@ -1,7 +1,7 @@
 // Lakshay Negi 241ADB131
 // https://github.com/lakshaynegi25/calc-lab-home
 // Compile with: gcc -O2 -Wall -Wextra -std=c17 -o calc calc.c -lm
-// Resources: ChatGPT (OpenAI); https://chatgpt.com/share/6ae0f970-e340-83eb-8027-ca3202731b0d
+// Resources used: https://chatgpt.com/share/6ae0f970-e340-83eb-8027-ca3202731b0d
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,6 +38,8 @@ void skip_spaces(const char **p) {
 // reads integers and decimals using strtoll and strtod? I'm confused about how
 // it rejects invalid number formats."
 // Checking the digits first prevents forbidden decimal forms from being accepted.
+// A missing number is reported where an operand was expected.
+// At the end of a line, this is the newline or EOF position.
 int parse_number(const char **p, Value *result) {
     skip_spaces(p);
 
@@ -106,6 +108,8 @@ int parse_primary(const char **p, Value *result) {
             return 0;
         }
         skip_spaces(p);
+        // If ')' is missing, the pointer reaches the newline or end of input.
+       // That position is used to report the missing closing parenthesis.
         if (**p != ')') {
             error_at = *p;
             return 0;
